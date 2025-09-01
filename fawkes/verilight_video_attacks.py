@@ -13,6 +13,7 @@ from tf_yolo import YoloV5FaceDetector
 from colorama import Style, Fore
 import os, contextlib
 import argparse
+import pandas as pd
 
 logging.getLogger('tensorflow').setLevel(logging.ERROR)
 os.environ["KMP_AFFINITY"] = "noverbose"
@@ -188,6 +189,32 @@ class Fawkes(object):
 
         return protected_images
    
+
+def test_case_done(attack_dir, perturbation_budget):
+    if not os.path.exists(f"{attack_dir}/frame_attack_log_{perturbation_budget}.csv") or \
+        not os.path.exists(f"{attack_dir}/cloaked_frames_{perturbation_budget}"):
+        return False
+    
+    # count number of frames in source_frames
+    source_frames_path = f"{attack_dir}/source_frames"
+    source_frames = glob.glob(source_frames_path + "/*")
+    num_source_frames = len(source_frames)
+
+    # count number of frames in cloaked_frames
+    cloaked_frames_path = f"{attack_dir}/cloaked_frames_{perturbation_budget}"
+    cloaked_frames = glob.glob(cloaked_frames_path + "/*")
+    num_cloaked_frames = len(cloaked_frames)
+    
+    
+    # read the cloaking log with pandas
+    df = pd.read_csv(f"{attack_dir}/frame_attack_log_{perturbation_budget}.csv")
+    # check if any thetas are greater than the threshold
+    if df["theta"].max() < 0.88 and num_source_frames != num_cloaked_frames:
+        return False
+    
+    return True
+    
+
 def run_test(perturbation_budget, results_directory):
 
     feature_extractors = ["resnet_arcface"]
@@ -214,6 +241,11 @@ def run_test(perturbation_budget, results_directory):
 
     for dir in attack_directories:
 
+        # check if there is a hold
+        if os.path.exists(f"{dir}/hold"):
+            print(f"{Fore.YELLOW} Hold file exists in {dir}. Skipping {Style.RESET_ALL}")
+            continue
+
         if "video_cloaking_log" in dir:
             continue
 
@@ -223,16 +255,9 @@ def run_test(perturbation_budget, results_directory):
         target_name = os.path.basename(dir).split("2")[1]
 
         if os.path.exists(f"{dir}/cloaked_frames_{perturbation_budget}"):
-            if "p12p3" in dir:
-                pass
-            # if there are files in the cloaked_frames dir but the cloaking log is empty, we need to pick up
-            # where we left off
-            # cloaked_frames = glob.glob(f"{dir}/cloaked_frames_{perturbation_budget}/*")
-            # if not os.path.exists(f"{dir}/frame_attack_log_{perturbation_budget}.csv"):
-            #     continue
-            # cloaking_log_lines = open(f"{dir}/frame_attack_log_{perturbation_budget}.csv").readlines()
-            # if len(cloaked_frames) > 0 and (len(cloaking_log_lines) == 1 or len(cloaking_log_lines) == 0):
-            #     print(f"{Fore.YELLOW} Cloaked frames already exist. Picking up where we left off {Style.RESET_ALL}")
+            if test_case_done(dir, perturbation_budget):
+                print(f"{Fore.GREEN} Cloaking already done. Skipping {Style.RESET_ALL}")
+                continue
         else:
             os.makedirs(f"{dir}/cloaked_frames_{perturbation_budget}", exist_ok=True)
         
@@ -241,19 +266,25 @@ def run_test(perturbation_budget, results_directory):
             continue
 
         target_emb = im_scorer.get_embedding(target_img_path)
-        frame_attack_log = open(f"{dir}/frame_attack_log_{perturbation_budget}.csv", "w")
-        frame_attack_log.write("frame,theta\n")
+        if os.path.exists(f"{dir}/frame_attack_log_{perturbation_budget}.csv"):
+            frame_attack_log = open(f"{dir}/frame_attack_log_{perturbation_budget}.csv", "a")
+        else:
+            frame_attack_log = open(f"{dir}/frame_attack_log_{perturbation_budget}.csv", "w")
+            frame_attack_log.write("frame,theta\n")
         
         # perturb each source frame
         print(Fore.MAGENTA + f"Cloaking {source_name} to {target_name} with rho {perturbation_budget}" + Style.RESET_ALL)
         for i, source_img_path in enumerate(glob.glob(source_frames_path + "/*")):
             # check if the cloaked frame already exists
             if os.path.exists(f"{dir}/cloaked_frames_{perturbation_budget}/{i}.jpg"):
-                print(f"{Fore.YELLOW} Cloaked frame {i} already exists. Skipping {Style.RESET_ALL}")
+                # print(f"{Fore.YELLOW} Cloaked frame {i} already exists. Skipping {Style.RESET_ALL}")
                 continue
 
             print(Fore.MAGENTA + f"{dir} frame {i}" + Style.RESET_ALL)
-            
+
+            # write a file called "hold" to the attack directory to signal that the attack is in progress
+            hold = open(f"{dir}/hold", "w")
+      
             res = protector.run_protection(source_img_path, target_img_path, th=th, sd=sd, lr=lr,
                                 max_step=max_step,
                                 batch_size=batch_size, format=format,
@@ -279,7 +310,8 @@ def run_test(perturbation_budget, results_directory):
             if cloak_target_theta >  threshold:
                 break
 
-         
+        # remove hold
+        os.remove(f"{dir}/hold")
 
         f.write(f"{source_name},{target_name}\n")
         f.flush()
@@ -332,6 +364,6 @@ def prepare_videos():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--perturbation_budget", "-p", type=float)
+    parser.add_argument("--perturbation_budget", "-p", type=float, required=True)
     args = parser.parse_args()
     run_test(args.perturbation_budget, "vox/attack")
